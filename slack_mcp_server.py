@@ -195,6 +195,40 @@ async def search_messages(
 
 
 @mcp.tool()
+async def search_files(
+    query: str, user: str = "", after: str = "", count: int = 20
+) -> list[dict[str, Any]]:
+    """Search for files and documents in the workspace.
+    
+    Args:
+        query: Search query (document title, keywords)
+        user: Optional - filter by username who shared the file
+        after: Optional date filter (e.g., "2026-01-05")
+        count: Number of files to return (max 100, default 20)
+    
+    Returns:
+        List of files with titles, links, and metadata
+    """
+    # Build search query
+    search_query = query
+    if user:
+        search_query += f" from:{user}"
+    if after:
+        search_query += f" after:{after}"
+    
+    count = min(count, 100)
+    await log_to_slack(f"Searching files: {search_query} (limit: {count})")
+    
+    url = f"{SLACK_API_BASE}/search.files"
+    payload = {"query": search_query, "sort": "timestamp", "count": count}
+    data = await make_request(url, method="GET", payload=payload)
+    
+    if data and data.get("ok"):
+        return data.get("files", {}).get("matches", [])
+    return []
+
+
+@mcp.tool()
 async def search_dms(
     user_id: str, query: str = "", after: str = "", count: int = 20
 ) -> list[dict[str, Any]]:
@@ -219,6 +253,84 @@ async def search_dms(
         dm_query += f" after:{after}"
     
     return await search_messages(dm_query, "timestamp", count)
+    
+@mcp.tool()
+async def get_thread_by_link(thread_link: str, limit: int = 200) -> dict[str, Any]:
+    """Get a full thread by providing a Slack thread link.
+    
+    Args:
+        thread_link: A Slack thread URL
+        limit: Maximum number of messages to return (default 200)
+    
+    Returns:
+        A dict with 'thread_starter' (the original message) and 'replies' (all thread messages)
+    """
+    await log_to_slack(f"Fetching thread from link: {thread_link}")
+    
+    # Parse the URL to extract channel_id and timestamps
+    # Format: https://workspace.slack.com/archives/CHANNEL_ID/pTIMESTAMP(?thread_ts=PARENT_TS)
+    
+    # Extract channel_id
+    channel_match = re.search(r'/archives/([A-Z0-9]+)/', thread_link)
+    if not channel_match:
+        return {"error": "Could not extract channel ID from link", "thread_starter": None, "replies": []}
+    
+    channel_id = channel_match.group(1)
+    
+    # Extract message timestamp from the 'p' value
+    ts_match = re.search(r'/p(\d+)', thread_link)
+    if not ts_match:
+        return {"error": "Could not extract message timestamp from link", "thread_starter": None, "replies": []}
+    
+    message_ts_raw = ts_match.group(1)
+    
+    # Check if there's a thread_ts query parameter (meaning this is a reply, not the thread starter)
+    thread_ts_match = re.search(r'thread_ts=(\d+\.\d+)', thread_link)
+    
+    if thread_ts_match:
+        # This is a link to a reply - use the thread_ts as the parent
+        thread_ts = thread_ts_match.group(1)
+    else:
+        # This is a direct link to the thread starter - convert the p-value to timestamp
+        thread_ts = convert_thread_ts(message_ts_raw)
+    
+    if not thread_ts:
+        return {"error": "Could not determine thread timestamp", "thread_starter": None, "replies": []}
+    
+    # Fetch all replies in the thread (GET with query params per Slack API docs)
+    replies_url = f"{SLACK_API_BASE}/conversations.replies"
+    replies_payload = {
+        "channel": channel_id,
+        "ts": thread_ts,
+        "limit": limit,
+    }
+    replies_data = await make_request(replies_url, method="GET", payload=replies_payload)
+    
+    if not replies_data or not replies_data.get("ok"):
+        error_msg = replies_data.get("error", "Unknown error") if replies_data else "Request failed"
+        return {
+            "error": f"Failed to fetch thread: {error_msg}",
+            "debug": {
+                "channel_id": channel_id,
+                "thread_ts": thread_ts,
+                "message_ts_raw": message_ts_raw,
+                "had_thread_ts_in_url": thread_ts_match is not None,
+                "api_payload": replies_payload,
+                "api_response": replies_data,
+            },
+            "thread_starter": None,
+            "replies": []
+        }
+    
+    messages = replies_data.get("messages", [])
+    
+    return {
+        "channel_id": channel_id,
+        "thread_ts": thread_ts,
+        "thread_starter": messages[0] if messages else None,
+        "replies": messages[1:] if len(messages) > 1 else [],
+        "total_messages": len(messages),
+    }
 
 
 @mcp.tool()
