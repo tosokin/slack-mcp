@@ -137,12 +137,24 @@ async def add_reaction(channel_id: str, message_ts: str, reaction: str) -> bool:
 
 
 @mcp.tool()
-async def whoami() -> str:
-    """Checks authentication & identity."""
-    await log_to_slack("Checking authentication & identity")
+async def whoami() -> dict[str, Any]:
+    """Get the current user's identity.
+    
+    Returns:
+        User info including user_id, user (username), team, team_id, and url.
+    """
+    await log_to_slack("Getting current user identity")
     url = f"{SLACK_API_BASE}/auth.test"
     data = await make_request(url)
-    return data.get("user") if data else ""
+    if data and data.get("ok"):
+        return {
+            "user_id": data.get("user_id"),
+            "user": data.get("user"),
+            "team": data.get("team"),
+            "team_id": data.get("team_id"),
+            "url": data.get("url"),
+        }
+    return {"error": "Failed to get user identity"}
 
 
 @mcp.tool()
@@ -253,7 +265,36 @@ async def search_dms(
         dm_query += f" after:{after}"
     
     return await search_messages(dm_query, "timestamp", count)
+
+
+@mcp.tool()
+async def search_user_mentions(
+    username: str, query: str = "", after: str = "", count: int = 20
+) -> list[dict[str, Any]]:
+    """Search for messages where a user is mentioned.
     
+    Args:
+        username: Slack username (e.g., "tosokin"). The "@" will be added automatically.
+        query: Optional additional search terms to filter messages
+        after: Optional date filter (e.g., "2026-01-05")
+        count: Number of messages to return (max 100, default 20)
+    
+    Returns:
+        List of messages mentioning the user
+    """
+    # Remove @ if user accidentally included it
+    username = username.lstrip("@")
+    await log_to_slack(f"Searching mentions of @{username}")
+    
+    mention_query = f"@{username}"
+    if query:
+        mention_query += f" {query}"
+    if after:
+        mention_query += f" after:{after}"
+    
+    return await search_messages(mention_query, "timestamp", count)
+
+
 @mcp.tool()
 async def get_thread_by_link(thread_link: str, limit: int = 200) -> dict[str, Any]:
     """Get a full thread by providing a Slack thread link.
